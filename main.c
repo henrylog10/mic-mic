@@ -1,97 +1,86 @@
-#define F_CPU 16000000UL   // Define F_CPU antes de incluir <util/delay.h>
 #include <avr/io.h>
 #include <avr/interrupt.h>
-#include <util/delay.h>    // Agora F_CPU já está definido
-#include <avr/pgmspace.h>
 
-// Constantes
-#define BAUD 4800          // Taxa de transmissão UART
-#define UBRR_VAL ((F_CPU / (16UL * BAUD)) - 1) // Cálculo do UBRR
+#define F_CPU 16000000UL  // Frequência do clock do ATmega328P (16 MHz)
+#include <util/delay.h>
 
-// Tabela de segmentos (0-F e '-')
-const uint8_t seg_table[] PROGMEM = {
-    0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07,
-    0x7F, 0x6F, 0x77, 0x7C, 0x39, 0x5E, 0x79, 0x71, 0x40
-};
+// Configuração dos pinos
+#define SDI PB6
+#define CLK PB5
+#define BUTTON PD3
+#define BTN_GND PD2
 
-// String do nome (José Henrique Barbosa Pena)
-const char name_string[] PROGMEM = "José Henrique Barbosa Pena";
+void uart_init() {
+    unsigned int ubrr = 12;  // Para 4800 bps com 16 MHz
+    UBRR0H = (unsigned char)(ubrr >> 8);
+    UBRR0L = (unsigned char)ubrr;
+    UCSR0B = (1 << RXEN0) | (1 << TXEN0) | (1 << RXCIE0);  // Habilita RX, TX e interrupção RX
+    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);  // 8 bits de dados
+}
 
-// Variáveis globais
-volatile uint8_t tx_flag = 0; // Flag de transmissão
+void uart_transmit(unsigned char data) {
+    while (!(UCSR0A & (1 << UDRE0)));  // Espera até o buffer estar vazio
+    UDR0 = data;
+}
 
-// Função para enviar o nome pela UART
-void send_name() {
-    uint8_t i = 0;
-    char c;
-    while ((c = pgm_read_byte(&name_string[i])) != 0) {
-        while (!(UCSR0A & (1 << UDRE0))); // Espera UDR0 estar vazio
-        UDR0 = c; // Envia caractere
-        i++;
+unsigned char uart_receive(void) {
+    while (!(UCSR0A & (1 << RXC0)));  // Espera por dado
+    return UDR0;
+}
+
+void update_display(unsigned char data) {
+    PORTB = data;  // Envia o dado para os pinos de controle do display
+}
+
+void ascii_to_7seg(char c, unsigned char* data) {
+    switch (c) {
+        case '0': *data = 0x3F; break;
+        case '1': *data = 0x06; break;
+        case '2': *data = 0x5B; break;
+        case '3': *data = 0x4F; break;
+        case '4': *data = 0x66; break;
+        case '5': *data = 0x6D; break;
+        case '6': *data = 0x7D; break;
+        case '7': *data = 0x07; break;
+        case '8': *data = 0x7F; break;
+        case '9': *data = 0x6F; break;
+        default: *data = 0x00; break;
     }
 }
 
-// Interrupção UART RX
+void setup() {
+    // Configura PB6 (SDI) e PB5 (CLK) como saída
+    DDRB |= (1 << SDI) | (1 << CLK);
+    // Configura PD3 (BUTTON) como entrada com pull-up
+    DDRD &= ~(1 << BUTTON);
+    PORTD |= (1 << BUTTON);  // Ativa o pull-up
+    // Configura PD2 como saída para BTN_GND
+    DDRD |= (1 << BTN_GND);
+    PORTD &= ~(1 << BTN_GND);  // GND
+
+    uart_init();  // Inicializa a UART
+    sei();  // Habilita interrupções globais
+}
+
 ISR(USART_RX_vect) {
-    uint8_t temp = UDR0; // Lê dado recebido
-    uint8_t hex_val, seg_code;
-
-    // Verifica se é '0'-'9'
-    if (temp >= '0' && temp <= '9') {
-        hex_val = temp - '0'; // Converte para 0x00-0x09
-    }
-    // Verifica 'A'-'F'
-    else if (temp >= 'A' && temp <= 'F') {
-        hex_val = temp - 'A' + 10; // Converte para 0x0A-0x0F
-    }
-    // Verifica 'a'-'f'
-    else if (temp >= 'a' && temp <= 'f') {
-        hex_val = temp - 'a' + 10; // Converte para 0x0A-0x0F
-    }
-    // Caractere inválido
-    else {
-        seg_code = 0x40; // Código para '-'
-        PORTD = seg_code; // Atualiza display
-        return;
-    }
-
-    // Carrega código do segmento
-    seg_code = pgm_read_byte(&seg_table[hex_val]);
-    PORTD = seg_code; // Atualiza display
+    unsigned char received = uart_receive();  // Lê o dado recebido pela UART
+    unsigned char display_data;
+    ascii_to_7seg(received, &display_data);  // Converte para 7 segmentos
+    update_display(display_data);  // Atualiza o display
 }
 
-// Interrupção do botão (INT0)
-ISR(INT0_vect) {
-    tx_flag = 1; // Ativa flag de transmissão
+ISR(INT1_vect) {
+    // Interrupção do botão: envia o nome pela UART
+    uart_transmit('A');
+    uart_transmit('L');
+    uart_transmit('U');
+    uart_transmit('N');
 }
 
-int main(void) {
-    // Inicializa stack pointer
-    SP = RAMEND;
-
-    // Configura UART
-    UBRR0H = (uint8_t)(UBRR_VAL >> 8);
-    UBRR0L = (uint8_t)(UBRR_VAL);
-    UCSR0B = (1 << RXEN0) | (1 << TXEN0) | (1 << RXCIE0); // Habilita RX, TX e interrupção
-    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00); // Modo 8N1
-
-    // Configura PortD como saída (display 7 segmentos)
-    DDRD = 0xFF;
-
-    // Configura botão em PD2 (INT0) com pull-up
-    DDRD &= ~(1 << PD2);
-    PORTD |= (1 << PD2);
-    EICRA = (1 << ISC01); // Borda de descida
-    EIMSK = (1 << INT0);  // Habilita INT0
-
-    sei(); // Habilita interrupções globais
-
+int main() {
+    setup();
     while (1) {
-        if (tx_flag) { // Verifica se o botão foi pressionado
-            send_name(); // Envia o nome
-            tx_flag = 0; // Limpa a flag
-        }
+        // Loop principal
     }
-
     return 0;
 }
